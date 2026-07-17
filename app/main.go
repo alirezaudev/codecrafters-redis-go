@@ -23,6 +23,8 @@ var (
 	pongResponse = []byte("+PONG" + crlf)
 )
 
+var errProtocol = errors.New("protocol violation")
+
 func main() {
 	l, err := net.Listen("tcp", "0.0.0.0:6379")
 	if err != nil {
@@ -37,80 +39,120 @@ func main() {
 			log.Printf("[Error] accepting connection: %v", connErr)
 			os.Exit(1)
 		}
-		go func(conn net.Conn) {
-			defer func() {
-				if r := recover(); r != nil {
-					log.Printf("[Error] recovered from panic: %v", r)
-				}
-			}()
-			defer conn.Close()
-			reader := bufio.NewReader(conn)
-
-			for { // connection lifetime
-
-				header, headerErr := reader.ReadBytes(delimiter)
-				if headerErr != nil {
-					if errors.Is(headerErr, io.EOF) {
-						log.Printf("[EOF] Connection closed by remote host")
-						return
-					}
-					log.Printf("[Error] Failed to read header: %v", headerErr)
-					return
-				}
-
-				if header[0] != arrayPrefix {
-					log.Printf("[Error] Invalid array prefix: %v", header[0])
-					return
-				}
-
-				n := readDigits(header[1:]) // array size
-				args := make([][]byte, n)
-				for i := 0; i < n; i++ {
-					sizeLine, sizeLineErr := reader.ReadBytes(delimiter)
-					if sizeLineErr != nil {
-						log.Printf("[Error] Failed to read arg size: %v", sizeLineErr)
-						return
-					}
-
-					if sizeLine[0] != bulkStringPrefix {
-						log.Printf("[Error] Invalid bulk string prefix: %v", sizeLine[0])
-						return
-					}
-
-					m := readDigits(sizeLine[1:])
-					buf := make([]byte, m+2) // +2: to read \r\n
-					_, argReadErr := io.ReadFull(reader, buf)
-					if argReadErr != nil {
-						log.Printf("[Error] Failed to read arg: %v", argReadErr)
-						return
-					}
-					args[i] = buf[:m]
-				}
-				if len(args) > 0 {
-					if bytes.EqualFold(args[0], ping) {
-						_, writeErr := conn.Write(pongResponse)
-						if writeErr != nil {
-							log.Printf("[Error] Failed to write pong: %v", writeErr)
-							return
-						}
-					}
-				}
-			}
-
-		}(conn)
+		go handleConnection(conn)
 	}
 }
 
-// readDigits to prevent converting like bytes -> string -> int
-func readDigits(digits []byte) int {
-	n := 0
-	for _, c := range digits {
-		if c < '0' || c > '9' {
-			return n
+func handleConnection(conn net.Conn) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("[Error] recovered from panic: %v", r)
+		}
+	}()
+	defer conn.Close()
+
+	reader := bufio.NewReader(conn)
+
+	for { // connection lifetime
+		args, readErr := readCommand(reader)
+		if readErr != nil {
+			if errors.Is(readErr, io.EOF) {
+				log.Printf("[EOF] Connection closed by remote host")
+				return
+			}
+			log.Printf("[Error] failed to read command: %v", readErr)
+			return
 		}
 
+		if err := respond(conn, args); err != nil {
+			log.Printf("[Error] failed to write response: %v", err)
+			return
+		}
+	}
+}
+
+func respond(conn net.Conn, args [][]byte) error {
+	if len(args) == 0 {
+		return nil
+	}
+
+	if bytes.EqualFold(args[0], ping) {
+		if _, err := conn.Write(pongResponse); err != nil {
+			return fmt.Errorf("writing pong: %w", err)
+		}
+	}
+
+	return nil
+}
+
+// readCommand reads one complete RESP command (an array of bulk strings,
+// e.g. "*1\r\n$4\r\nPING\r\n") and returns its arguments without framing.
+func readCommand(reader *bufio.Reader) ([][]byte, error) {
+	header, headerErr := reader.ReadBytes(delimiter)
+	if headerErr != nil {
+		return nil, fmt.Errorf("reading array header: %w", headerErr)
+	}
+
+	if header[0] != arrayPrefix {
+		return nil, fmt.Errorf("%w: invalid array prefix %q", errProtocol, header[0])
+	}
+
+	n, ok := readDigits(header[1:])
+	if !ok {
+		return nil, fmt.Errorf("%w: bad array size %q", errProtocol, header[1:])
+	}
+
+	args := make([][]byte, n)
+	for i := 0; i < n; i++ {
+		sizeLine, sizeErr := reader.ReadBytes(delimiter)
+		if sizeErr != nil {
+			return nil, fmt.Errorf("reading bulk string size: %w", sizeErr)
+		}
+
+		if sizeLine[0] != bulkStringPrefix {
+			return nil, fmt.Errorf("%w: invalid bulk string prefix %q", errProtocol, sizeLine[0])
+		}
+
+		m, ok := readDigits(sizeLine[1:])
+		if !ok {
+			return nil, fmt.Errorf("%w: bad bulk string size %q", errProtocol, sizeLine[1:])
+		}
+
+		buf := make([]byte, m+2) // +2: to read \r\n
+		if _, err := io.ReadFull(reader, buf); err != nil {
+			return nil, fmt.Errorf("reading bulk string payload: %w", err)
+		}
+
+		if buf[m] != '\r' || buf[m+1] != '\n' {
+			return nil, fmt.Errorf("%w: bulk string payload not terminated by CRLF", errProtocol)
+		}
+
+		args[i] = buf[:m]
+	}
+
+	return args, nil
+}
+
+// readDigits parses a decimal number from a "<digits>\r\n" slice without
+// converting to string. ok is false unless every byte before the CRLF
+// terminator is a digit.
+func readDigits(digits []byte) (int, bool) {
+	if len(digits) < 3 {
+		return 0, false
+	}
+
+	l := len(digits) - 1
+	if digits[l-1] != '\r' || digits[l] != '\n' {
+		return 0, false
+	}
+
+	n := 0
+	for _, c := range digits[:l-1] {
+		if c < '0' || c > '9' {
+			return 0, false
+		}
 		n = n*10 + int(c-'0')
 	}
 
-	return n
+	return n, true
 }
