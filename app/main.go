@@ -9,6 +9,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"strconv"
 )
 
 const (
@@ -19,7 +20,9 @@ const (
 )
 
 var (
+	crlfBytes    = []byte(crlf)
 	ping         = []byte("PING")
+	echo         = []byte("ECHO")
 	pongResponse = []byte("+PONG" + crlf)
 )
 
@@ -80,6 +83,13 @@ func respond(conn net.Conn, args [][]byte) error {
 		if _, err := conn.Write(pongResponse); err != nil {
 			return fmt.Errorf("writing pong: %w", err)
 		}
+	} else if bytes.EqualFold(args[0], echo) {
+		if len(args) != 2 {
+			return fmt.Errorf("echo command expected 1 argument, got %d", len(args)-1)
+		}
+		if _, err := conn.Write(encodeBulkString(args[1])); err != nil {
+			return fmt.Errorf("writing echo: %w", err)
+		}
 	}
 
 	return nil
@@ -123,7 +133,7 @@ func readCommand(reader *bufio.Reader) ([][]byte, error) {
 			return nil, fmt.Errorf("reading bulk string payload: %w", err)
 		}
 
-		if buf[m] != '\r' || buf[m+1] != '\n' {
+		if !bytes.Equal(buf[m:], crlfBytes) {
 			return nil, fmt.Errorf("%w: bulk string payload not terminated by CRLF", errProtocol)
 		}
 
@@ -131,6 +141,21 @@ func readCommand(reader *bufio.Reader) ([][]byte, error) {
 	}
 
 	return args, nil
+}
+
+func encodeBulkString(arg []byte) []byte {
+	n := len(arg)
+
+	// Maximum decimal digits for an int64 is 20.
+	buf := make([]byte, 0, 1+20+2+n+2)
+
+	buf = append(buf, bulkStringPrefix)
+	buf = strconv.AppendInt(buf, int64(n), 10)
+	buf = append(buf, crlf...)
+	buf = append(buf, arg...)
+	buf = append(buf, crlf...)
+
+	return buf
 }
 
 // readDigits parses a decimal number from a "<digits>\r\n" slice without
@@ -142,7 +167,7 @@ func readDigits(digits []byte) (int, bool) {
 	}
 
 	l := len(digits) - 1
-	if digits[l-1] != '\r' || digits[l] != '\n' {
+	if !bytes.Equal(digits[l-1:], crlfBytes) {
 		return 0, false
 	}
 
