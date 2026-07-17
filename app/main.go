@@ -13,17 +13,20 @@ import (
 )
 
 const (
-	crlf             = "\r\n"
-	delimiter        = '\n'
-	arrayPrefix      = '*'
-	bulkStringPrefix = '$'
+	crlf               = "\r\n"
+	delimiter          = '\n'
+	arrayPrefix        = '*'
+	bulkStringPrefix   = '$'
+	simpleStringPrefix = '+'
+
+	replyChunkBytes = 4 << 10
 )
 
 var (
-	crlfBytes    = []byte(crlf)
-	ping         = []byte("PING")
-	echo         = []byte("ECHO")
-	pongResponse = []byte("+PONG" + crlf)
+	crlfBytes = []byte(crlf)
+	ping      = []byte("PING")
+	echo      = []byte("ECHO")
+	pong      = []byte("PONG")
 )
 
 var errProtocol = errors.New("protocol violation")
@@ -55,7 +58,7 @@ func handleConnection(conn net.Conn) {
 	defer conn.Close()
 
 	reader := bufio.NewReader(conn)
-
+	out := make([]byte, 0, replyChunkBytes)
 	for { // connection lifetime
 		args, readErr := readCommand(reader)
 		if readErr != nil {
@@ -67,32 +70,40 @@ func handleConnection(conn net.Conn) {
 			return
 		}
 
-		if err := respond(conn, args); err != nil {
+		var err error
+		out, err = respond(out[:0], args)
+		if err != nil {
+			log.Printf("[Error] failed to respond: %v", err)
+			return
+		}
+
+		if _, err := conn.Write(out); err != nil {
 			log.Printf("[Error] failed to write response: %v", err)
 			return
 		}
 	}
 }
 
-func respond(conn net.Conn, args [][]byte) error {
+func respond(out []byte, args [][]byte) ([]byte, error) {
 	if len(args) == 0 {
-		return nil
+		return out, nil
 	}
 
-	if bytes.EqualFold(args[0], ping) {
-		if _, err := conn.Write(pongResponse); err != nil {
-			return fmt.Errorf("writing pong: %w", err)
-		}
-	} else if bytes.EqualFold(args[0], echo) {
+	switch {
+	case bytes.EqualFold(args[0], ping):
+		out = appendSimpleString(out, pong)
+
+	case bytes.EqualFold(args[0], echo):
 		if len(args) != 2 {
-			return fmt.Errorf("echo command expected 1 argument, got %d", len(args)-1)
+			return out, fmt.Errorf("echo command expected 1 argument, got %d", len(args)-1)
 		}
-		if _, err := conn.Write(encodeBulkString(args[1])); err != nil {
-			return fmt.Errorf("writing echo: %w", err)
-		}
+		out = appendBulkString(out, args[1])
+
+	default:
+		return out, fmt.Errorf("unknown command %q", args[0])
 	}
 
-	return nil
+	return out, nil
 }
 
 // readCommand reads one complete RESP command (an array of bulk strings,
@@ -143,19 +154,24 @@ func readCommand(reader *bufio.Reader) ([][]byte, error) {
 	return args, nil
 }
 
-func encodeBulkString(arg []byte) []byte {
-	n := len(arg)
+// appendBulkString appends arg to dst as a RESP bulk string
+// ("$" + <len> + "\r\n" + <payload> + "\r\n")
+func appendBulkString(dst, arg []byte) []byte {
+	dst = append(dst, bulkStringPrefix)
+	dst = strconv.AppendInt(dst, int64(len(arg)), 10)
+	dst = append(dst, crlf...)
+	dst = append(dst, arg...)
+	dst = append(dst, crlf...)
+	return dst
+}
 
-	// Maximum decimal digits for an int64 is 20.
-	buf := make([]byte, 0, 1+20+2+n+2)
-
-	buf = append(buf, bulkStringPrefix)
-	buf = strconv.AppendInt(buf, int64(n), 10)
-	buf = append(buf, crlf...)
-	buf = append(buf, arg...)
-	buf = append(buf, crlf...)
-
-	return buf
+// appendSimpleString appends msg to dst as a RESP simple string
+// ("+" + <msg> + "\r\n")
+func appendSimpleString(dst, msg []byte) []byte {
+	dst = append(dst, simpleStringPrefix)
+	dst = append(dst, msg...)
+	dst = append(dst, crlf...)
+	return dst
 }
 
 // readDigits parses a decimal number from a "<digits>\r\n" slice without
