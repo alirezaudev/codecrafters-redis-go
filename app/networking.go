@@ -52,12 +52,8 @@ func (c *client) serve() {
 			return
 		}
 
-		var err error
-		c.reply, err = respond(c.reply[:0], argv)
-		if err != nil {
-			log.Printf("[Error] failed to respond: %v", err)
-			return
-		}
+		c.reply = c.reply[:0]
+		processCommand(c, argv)
 
 		if _, err := c.conn.Write(c.reply); err != nil {
 			log.Printf("[Error] failed to write response: %v", err)
