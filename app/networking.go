@@ -21,13 +21,15 @@ type client struct {
 	conn   net.Conn
 	reader *bufio.Reader
 	reply  []byte
+	db     *db
 }
 
-func newClient(conn net.Conn) *client {
+func newClient(conn net.Conn, database *db) *client {
 	return &client{
 		conn:   conn,
 		reader: bufio.NewReader(conn),
 		reply:  make([]byte, 0, replyChunkBytes),
+		db:     database,
 	}
 }
 

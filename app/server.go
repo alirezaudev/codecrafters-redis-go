@@ -1,6 +1,27 @@
 package main
 
-import "fmt"
+import (
+	"fmt"
+	"net"
+)
+
+func runServer(addr string) error {
+	l, err := net.Listen("tcp", addr)
+	if err != nil {
+		return fmt.Errorf("binding to %s: %w", addr, err)
+	}
+	defer l.Close()
+
+	database := newDB()
+
+	for {
+		conn, err := l.Accept()
+		if err != nil {
+			return fmt.Errorf("accepting connection: %w", err)
+		}
+		go newClient(conn, database).serve()
+	}
+}
 
 type handler interface {
 	serveCommand(c *client, argv [][]byte) error

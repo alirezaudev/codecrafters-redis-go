@@ -1,19 +1,13 @@
 package main
 
 func setCommand(c *client, argv [][]byte) error {
-	mu.Lock()
-	storage[string(argv[1])] = string(argv[2])
-	mu.Unlock()
-
+	c.db.set(string(argv[1]), string(argv[2]))
 	c.addReply(shared.ok)
 	return nil
 }
 
 func getCommand(c *client, argv [][]byte) error {
-	mu.RLock()
-	v, ok := storage[string(argv[1])]
-	mu.RUnlock()
-
+	v, ok := c.db.get(string(argv[1]))
 	if !ok {
 		c.addReplyNull()
 		return nil
