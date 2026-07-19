@@ -1,28 +1,79 @@
 package main
 
-import "sync"
-
-// db is the keyspace (Redis calls the map "dict").
+// db is the keyspace (Redis calls the map "dict"). All access goes through
+// the owner goroutine started in newDB, reqs is its mailbox.
 type db struct {
-	mu   sync.RWMutex
-	dict map[string]string
+	reqs chan request
+}
+
+type request interface {
+	apply(dict map[string]string)
 }
 
 func newDB() *db {
-	return &db{dict: map[string]string{}}
+	dict := map[string]string{}
+
+	d := &db{
+		reqs: make(chan request),
+	}
+
+	go d.loop(dict)
+
+	return d
+}
+
+func (d *db) loop(dict map[string]string) {
+	for req := range d.reqs {
+		req.apply(dict)
+	}
 }
 
 func (d *db) set(key, val string) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
+	reply := make(chan setReply, 1)
+	d.reqs <- setRequest{
+		key:   key,
+		val:   val,
+		reply: reply,
+	}
 
-	d.dict[key] = val
+	<-reply
 }
 
 func (d *db) get(key string) (string, bool) {
-	d.mu.RLock()
-	defer d.mu.RUnlock()
+	reply := make(chan getReply, 1)
+	d.reqs <- getRequest{
+		key:   key,
+		reply: reply,
+	}
 
-	v, ok := d.dict[key]
-	return v, ok
+	r := <-reply
+	return r.val, r.ok
+}
+
+type setRequest struct {
+	key   string
+	val   string
+	reply chan setReply
+}
+
+type setReply struct{}
+
+func (req setRequest) apply(dict map[string]string) {
+	dict[req.key] = req.val
+	req.reply <- setReply{}
+}
+
+type getRequest struct {
+	key   string
+	reply chan getReply
+}
+
+type getReply struct {
+	val string
+	ok  bool
+}
+
+func (req getRequest) apply(dict map[string]string) {
+	v, ok := dict[req.key]
+	req.reply <- getReply{val: v, ok: ok}
 }
