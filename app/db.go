@@ -1,17 +1,24 @@
 package main
 
+import "time"
+
 // db is the keyspace (Redis calls the map "dict"). All access goes through
 // the owner goroutine started in newDB, reqs is its mailbox.
 type db struct {
 	reqs chan request
 }
 
+type entry struct {
+	value     string
+	expiresAt time.Time
+}
+
 type request interface {
-	apply(dict map[string]string)
+	apply(dict map[string]entry)
 }
 
 func newDB() *db {
-	dict := map[string]string{}
+	dict := map[string]entry{}
 
 	d := &db{
 		reqs: make(chan request),
@@ -22,19 +29,25 @@ func newDB() *db {
 	return d
 }
 
-func (d *db) loop(dict map[string]string) {
+func (d *db) loop(dict map[string]entry) {
 	for req := range d.reqs {
 		req.apply(dict)
 	}
 }
 
-func (d *db) set(key, val string) {
+func (d *db) set(key, val string, ttl time.Duration) {
 	reply := make(chan setReply, 1)
-	d.reqs <- setRequest{
+	req := setRequest{
 		key:   key,
 		val:   val,
 		reply: reply,
 	}
+
+	if ttl > 0 {
+		req.expiresAt = time.Now().Add(ttl)
+	}
+
+	d.reqs <- req
 
 	<-reply
 }
@@ -47,19 +60,20 @@ func (d *db) get(key string) (string, bool) {
 	}
 
 	r := <-reply
-	return r.val, r.ok
+	return r.entry.value, r.ok
 }
 
 type setRequest struct {
-	key   string
-	val   string
-	reply chan setReply
+	key       string
+	val       string
+	expiresAt time.Time
+	reply     chan setReply
 }
 
 type setReply struct{}
 
-func (req setRequest) apply(dict map[string]string) {
-	dict[req.key] = req.val
+func (req setRequest) apply(dict map[string]entry) {
+	dict[req.key] = entry{value: req.val, expiresAt: req.expiresAt}
 	req.reply <- setReply{}
 }
 
@@ -69,11 +83,16 @@ type getRequest struct {
 }
 
 type getReply struct {
-	val string
-	ok  bool
+	entry entry
+	ok    bool
 }
 
-func (req getRequest) apply(dict map[string]string) {
+func (req getRequest) apply(dict map[string]entry) {
 	v, ok := dict[req.key]
-	req.reply <- getReply{val: v, ok: ok}
+	if !v.expiresAt.IsZero() && time.Now().After(v.expiresAt) {
+		v = entry{}
+		ok = false
+		delete(dict, req.key)
+	}
+	req.reply <- getReply{entry: v, ok: ok}
 }
